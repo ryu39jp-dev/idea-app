@@ -286,11 +286,11 @@ st.markdown(
 )
 
 # API キー未設定時の警告
-if not (os.getenv("OPENAI_API_KEY") or os.getenv("GEMINI_API_KEY")):
+# 修正後（Geminiがあれば動くように変更）
+if not os.getenv("GEMINI_API_KEY"):
     st.warning(
-        "⚠️ **APIキーが設定されていません。** "
-        "`.env` ファイルに `OPENAI_API_KEY` または `GEMINI_API_KEY` を設定してください。"
-        "現在はダミーデータで動作しています。",
+        "⚠️ **GeminiのAPIキーが設定されていません。** "
+        "`.env` ファイルに `GEMINI_API_KEY` を設定してください。",
         icon="⚠️",
     )
 
@@ -314,7 +314,7 @@ else:
     badge_html = (
         f'<span class="badge badge-purple">IDEA #{current_idea.id}</span>'
         f'<span class="badge badge-blue">評価済み {eval_count} 件</span>'
-        f'<span class="badge badge-green">{"🔴 DEMO" if not (os.getenv("OPENAI_API_KEY") or os.getenv("GEMINI_API_KEY")) else "🟢 LIVE"}</span>'
+        f'<span class="badge badge-green">{"🟢 LIVE" if os.getenv("GEMINI_API_KEY") else "🔴 DEMO"}</span>'
     )
 
     st.markdown(

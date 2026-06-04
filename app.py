@@ -15,8 +15,12 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-import streamlit as st
 from dotenv import load_dotenv  # python-dotenv
+
+# .env を最初に読み込む（他モジュールの os.getenv より前に実行する必要がある）
+load_dotenv()
+
+import streamlit as st
 
 import database as db
 import llm_client as llm
@@ -25,8 +29,6 @@ import prompt_builder as pb
 # ──────────────────────────────────────────
 # 初期設定
 # ──────────────────────────────────────────
-
-load_dotenv()  # .env ファイルから環境変数を読み込む
 
 st.set_page_config(
     page_title="アイデア評価ループ",
@@ -233,7 +235,7 @@ def _generate_and_save_idea(user_prompt: str) -> db.Idea:
     APIキー未設定の場合はダミーデータを使用する。
     """
     api_key_set = bool(
-        os.getenv("OPENAI_API_KEY") or os.getenv("GEMINI_API_KEY")
+        os.getenv("AWS_ACCESS_KEY_ID") and os.getenv("AWS_SECRET_ACCESS_KEY")
     )
 
     if api_key_set:
@@ -286,12 +288,27 @@ st.markdown(
 )
 
 # API キー未設定時の警告
-# 修正後（Geminiがあれば動くように変更）
-if not os.getenv("GEMINI_API_KEY"):
+if not (os.getenv("AWS_ACCESS_KEY_ID") and os.getenv("AWS_SECRET_ACCESS_KEY")):
     st.warning(
-        "⚠️ **GeminiのAPIキーが設定されていません。** "
-        "`.env` ファイルに `GEMINI_API_KEY` を設定してください。",
+        "⚠️ **AWS認証情報が設定されていません。** "
+        "`.env` ファイルに `AWS_ACCESS_KEY_ID` と `AWS_SECRET_ACCESS_KEY` を設定してください。"
+        "現在はダミーデータで動作しています。",
         icon="⚠️",
+    )
+
+# 🔍 デバッグ：環境変数の読み込み状況を確認（問題解決後に削除可）
+with st.expander("🔍 デバッグ：環境変数の読み込み状況", expanded=False):
+    access_key = os.getenv("AWS_ACCESS_KEY_ID", "")
+    secret_key = os.getenv("AWS_SECRET_ACCESS_KEY", "")
+    region     = os.getenv("AWS_DEFAULT_REGION", "us-east-1（デフォルト）")
+    model_id   = os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-3-haiku-20240307-v1:0（デフォルト）")
+    st.code(
+        f"AWS_ACCESS_KEY_ID     = {'✅ 設定済み (' + access_key[:8] + '...)' if access_key else '❌ 未設定'}\n"
+        f"AWS_SECRET_ACCESS_KEY = {'✅ 設定済み' if secret_key else '❌ 未設定'}\n"
+        f"AWS_DEFAULT_REGION    = {region}\n"
+        f"BEDROCK_MODEL_ID      = {model_id}\n"
+        f".envファイルの場所     = {os.path.abspath('.env')}\n"
+        f".envファイルの存在     = {os.path.exists('.env')}"
     )
 
 # エラーメッセージ表示
@@ -314,7 +331,7 @@ else:
     badge_html = (
         f'<span class="badge badge-purple">IDEA #{current_idea.id}</span>'
         f'<span class="badge badge-blue">評価済み {eval_count} 件</span>'
-        f'<span class="badge badge-green">{"🟢 LIVE" if os.getenv("GEMINI_API_KEY") else "🔴 DEMO"}</span>'
+        f'<span class="badge badge-green">{"🔴 DEMO" if not (os.getenv("AWS_ACCESS_KEY_ID") and os.getenv("AWS_SECRET_ACCESS_KEY")) else "🟢 LIVE"}</span>'
     )
 
     st.markdown(

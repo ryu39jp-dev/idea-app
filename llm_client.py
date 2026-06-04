@@ -1,25 +1,31 @@
 """
-llm_client.py — LLM API クライアント（OpenAI / Gemini 切り替え対応）
+llm_client.py — LLM API クライアント（Amazon Bedrock 対応）
 
 環境変数:
-  OPENAI_API_KEY   : OpenAI を使う場合に設定
-  GEMINI_API_KEY   : Gemini を使う場合に設定
-  LLM_PROVIDER     : "openai" または "gemini"（デフォルト: openai）
+  AWS_ACCESS_KEY_ID      : AWSアクセスキー
+  AWS_SECRET_ACCESS_KEY  : AWSシークレットキー
+  AWS_DEFAULT_REGION     : リージョン（デフォルト: us-east-1）
+  BEDROCK_MODEL_ID       : 使用するモデルID（デフォルト: anthropic.claude-3-haiku-20240307-v1:0）
 """
 
 from __future__ import annotations
 
+import json
 import os
 import textwrap
-from typing import Optional
+
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
 
 # ──────────────────────────────────────────
-# 設定
+# デフォルト設定
 # ──────────────────────────────────────────
 
-PROVIDER        = os.getenv("LLM_PROVIDER", "openai").lower()
-OPENAI_MODEL    = os.getenv("OPENAI_MODEL",  "gpt-4o-mini")
-GEMINI_MODEL    = os.getenv("GEMINI_MODEL",  "gemini-1.5-flash")
+DEFAULT_MODEL_ID = "anthropic.claude-haiku-4-5-20251001-v1:0"
+# 他の選択肢:
+#   "anthropic.claude-sonnet-4-5-20251001-v1:0"  （より高精度）
+#   "anthropic.claude-3-haiku-20240307-v1:0"      （旧世代・安定）
 
 
 # ──────────────────────────────────────────
@@ -28,104 +34,94 @@ GEMINI_MODEL    = os.getenv("GEMINI_MODEL",  "gemini-1.5-flash")
 
 def generate_idea(system_prompt: str, user_prompt: str) -> str:
     """
-    プロンプトをLLMに投げてアイデアテキストを返す。
-    PROVIDER に応じて OpenAI / Gemini を切り替える。
+    Amazon Bedrock を使ってアイデアを生成する。
 
     Raises:
-        EnvironmentError: APIキーが未設定の場合
+        EnvironmentError: AWS認証情報が未設定の場合
         RuntimeError:     API呼び出しに失敗した場合
     """
-    if PROVIDER == "gemini":
-        return _call_gemini(system_prompt, user_prompt)
-    else:
-        return _call_openai(system_prompt, user_prompt)
+    return _call_bedrock(system_prompt, user_prompt)
 
 
 # ──────────────────────────────────────────
-# OpenAI
+# Amazon Bedrock
 # ──────────────────────────────────────────
 
-def _call_openai(system_prompt: str, user_prompt: str) -> str:
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
+def _call_bedrock(system_prompt: str, user_prompt: str) -> str:
+    # 認証情報チェック
+    if not os.getenv("AWS_ACCESS_KEY_ID") or not os.getenv("AWS_SECRET_ACCESS_KEY"):
         raise EnvironmentError(
-            "OPENAI_API_KEY が設定されていません。"
-            ".env ファイルまたは環境変数に設定してください。"
+            "AWS認証情報が設定されていません。\n"
+            ".envファイルに以下を設定してください：\n"
+            "  AWS_ACCESS_KEY_ID=AKIAxxxx\n"
+            "  AWS_SECRET_ACCESS_KEY=xxxx\n"
+            "  AWS_DEFAULT_REGION=us-east-1"
         )
 
     try:
-        from openai import OpenAI  # type: ignore
+        import boto3  # type: ignore
     except ImportError as e:
         raise ImportError(
-            "openai パッケージがインストールされていません。"
-            "  pip install openai"
+            "boto3がインストールされていません。\n"
+            "  pip install boto3"
         ) from e
 
-    client = OpenAI(api_key=api_key)
+    model_id = os.getenv("BEDROCK_MODEL_ID", DEFAULT_MODEL_ID)
+    region   = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
 
-    try:
-        response = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": user_prompt},
-            ],
-            temperature=0.9,
-            max_tokens=600,
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        raise RuntimeError(f"OpenAI API エラー: {e}") from e
-
-
-# ──────────────────────────────────────────
-# Gemini
-# ──────────────────────────────────────────
-
-def _call_gemini(system_prompt: str, user_prompt: str) -> str:
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise EnvironmentError(
-            "GEMINI_API_KEY が設定されていません。"
-            ".env ファイルまたは環境変数に設定してください。"
-        )
-
-    try:
-        import google.generativeai as genai  # type: ignore
-    except ImportError as e:
-        raise ImportError(
-            "google-generativeai パッケージがインストールされていません。"
-            "  pip install google-generativeai"
-        ) from e
-
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(
-        model_name=GEMINI_MODEL,
-        system_instruction=system_prompt,
+    client = boto3.client(
+        service_name="bedrock-runtime",
+        region_name=region,
+        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+        aws_session_token=os.getenv("AWS_SESSION_TOKEN"),  # 一時認証トークン（任意）
     )
 
+    # Bedrock の Converse API（Claude・Nova など統一インターフェース）
     try:
-        response = model.generate_content(
-            user_prompt,
-            generation_config=genai.GenerationConfig(
-                temperature=0.9,
-                max_output_tokens=600,
-            ),
+        response = client.converse(
+            modelId=model_id,
+            system=[{"text": system_prompt}],
+            messages=[
+                {"role": "user", "content": [{"text": user_prompt}]}
+            ],
+            inferenceConfig={
+                "maxTokens": 600,
+                "temperature": 0.9,
+            },
         )
-        return response.text.strip()
+        return response["output"]["message"]["content"][0]["text"].strip()
+
     except Exception as e:
-        raise RuntimeError(f"Gemini API エラー: {e}") from e
+        msg = str(e)
+        if "AccessDeniedException" in msg:
+            raise RuntimeError(
+                "❌ Bedrockへのアクセスが拒否されました。\n"
+                f"モデル '{model_id}' へのアクセスが有効か確認してください。\n"
+                "AWSコンソール → Amazon Bedrock → モデルアクセス で申請が必要な場合があります。"
+            ) from e
+        if "ValidationException" in msg or "ResourceNotFoundException" in msg:
+            raise RuntimeError(
+                f"❌ モデルID '{model_id}' が見つかりません。\n"
+                ".envの BEDROCK_MODEL_ID を確認してください。\n"
+                "利用可能なモデル例:\n"
+                "  anthropic.claude-3-haiku-20240307-v1:0\n"
+                "  anthropic.claude-3-5-sonnet-20241022-v2:0\n"
+                "  amazon.nova-lite-v1:0"
+            ) from e
+        if "ThrottlingException" in msg:
+            raise RuntimeError(
+                "⏳ リクエストが多すぎます。少し待ってから再試行してください。"
+            ) from e
+        raise RuntimeError(f"Bedrock API エラー: {e}") from e
 
 
 # ──────────────────────────────────────────
-# ダミーモード（APIキーなしでの動作確認用）
+# ダミーモード（AWS認証なしでの動作確認用）
 # ──────────────────────────────────────────
 
 def generate_idea_dummy(user_prompt: str) -> str:
-    """
-    APIキー未設定時に使えるダミー生成関数。
-    開発・デモ用途のみ。
-    """
+    """AWS認証未設定時のデモ用ダミー生成"""
     return textwrap.dedent("""
         【アイデア名】だるさログ
         【一言説明】今日のだるさを記録して、パターンを可視化するアプリ

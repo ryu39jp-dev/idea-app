@@ -1,14 +1,37 @@
 # 💡 アイデア出し＆評価ループアプリ
 
-AIが生成したアプリ企画を評価することで、あなた好みのアイデアを磨き続けるフィードバックループアプリです。
+AIが生成したアプリ企画を評価するたびに、あなたの好みを学習して次のアイデアを磨き続けるフィードバックループアプリです。
 
 ## 仕組み
 
 ```
-[AIアイデア生成] → [ユーザー評価] → [評価をDBに保存] → [動的プロンプト生成] → [AIアイデア生成] → ...
+┌─────────────────────────────────────────────────────────────┐
+│                                                             │
+│   [AIアイデア生成]                                           │
+│        ↓                                                    │
+│   [ユーザーが4軸で評価 + 本音フィードバック]                   │
+│        ↓                                                    │
+│   [評価をSQLiteに保存]                                       │
+│        ↓                                                    │
+│   [高評価例・低評価例・直近の不満 → 動的プロンプト生成]         │
+│        ↓                                                    │
+│   [Amazon Bedrock (Claude Haiku 4.5) でアイデア再生成]  ←──┘
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-過去の高評価・低評価データを元にプロンプトを自動調整し、あなたの好みに近づくアイデアを生成し続けます。
+評価を重ねるほど「あなたにとって刺さるアイデア」に近づいていきます。
+
+---
+
+## 技術スタック
+
+| レイヤー | 技術 |
+|----------|------|
+| フロントエンド | Streamlit |
+| データベース | SQLite（起動時に自動生成） |
+| LLM | Amazon Bedrock — Claude Haiku 4.5 |
+| 認証 | AWS IAM（アクセスキー or IAMロール） |
 
 ---
 
@@ -20,31 +43,52 @@ AIが生成したアプリ企画を評価することで、あなた好みのア
 pip install -r requirements.txt
 ```
 
-Gemini を使う場合は追加でインストール:
-```bash
-pip install google-generativeai
+### 2. AWS側の準備
+
+#### ① IAMユーザーにBedrockの権限を付与
+
+IAMポリシーに以下のアクションを許可してください：
+
+```json
+{
+  "Effect": "Allow",
+  "Action": [
+    "bedrock:InvokeModel",
+    "bedrock:InvokeModelWithResponseStream"
+  ],
+  "Resource": "*"
+}
 ```
 
-### 2. APIキーの設定
+#### ② Bedrockでモデルアクセスを有効化
+
+AWSコンソール → **Amazon Bedrock** → **モデルアクセス** →
+`Claude Haiku 4.5` を選択して **アクセスをリクエスト**
+
+> ほとんどのモデルは即時承認されます。
+
+### 3. 環境変数の設定
 
 ```bash
 cp .env.example .env
 ```
 
-`.env` ファイルを編集してAPIキーを入力:
+`.env` を開いて以下を入力：
 
 ```env
-LLM_PROVIDER=openai
-OPENAI_API_KEY=sk-xxxxxxxxxxxx
+AWS_ACCESS_KEY_ID=AKIAxxxxxxxxxxxxxxxxxxxx
+AWS_SECRET_ACCESS_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+AWS_DEFAULT_REGION=us-east-1
+BEDROCK_MODEL_ID=anthropic.claude-haiku-4-5-20251001-v1:0
 ```
 
-### 3. アプリを起動
+### 4. アプリを起動
 
 ```bash
 streamlit run app.py
 ```
 
-ブラウザで `http://localhost:8501` が開きます。
+ブラウザで http://localhost:8501 が開きます。
 
 ---
 
@@ -53,52 +97,67 @@ streamlit run app.py
 ```
 .
 ├── app.py              # Streamlit メインアプリ（UI・セッション管理）
-├── database.py         # SQLite CRUD 操作
-├── llm_client.py       # LLM API クライアント（OpenAI / Gemini 対応）
-├── prompt_builder.py   # 動的プロンプト組み立てロジック
+├── database.py         # SQLite CRUD（テーブル定義・挿入・取得）
+├── llm_client.py       # Amazon Bedrock クライアント
+├── prompt_builder.py   # 評価履歴から動的プロンプトを組み立てるロジック
 ├── requirements.txt    # 依存パッケージ
 ├── .env.example        # 環境変数テンプレート
-└── idea_eval.db        # SQLite DB（起動時に自動生成）
+├── .env                # 実際の認証情報（gitignore 推奨）
+└── idea_eval.db        # SQLite DB（初回起動時に自動生成）
 ```
 
 ---
 
-## 評価項目
+## 評価項目（4軸）
 
-| 項目 | 説明 |
-|------|------|
-| ① 自分ニーズ度 | 自分が実際に欲しいと思えるか |
-| ② 感情のシンクロ度 | 共感できる・わかるという感覚 |
-| ③ 負の感情解消度 | モヤモヤ・だるさが解消されそうか |
-| ④ 意外性 | 驚きや新鮮さがあるか |
+| # | 項目 | 問いかけ |
+|---|------|----------|
+| ① | 自分ニーズ度 | 自分が実際に欲しいと思えるか？ |
+| ② | 感情のシンクロ度 | 「わかる」と共感できるか？ |
+| ③ | 負の感情解消度 | モヤモヤ・だるさが解消されそうか？ |
+| ④ | 意外性 | 驚きや新鮮さがあるか？ |
 
-4項目の平均スコアが高いアイデアを Few-shot 例として、低いアイデアを「避けるべき例」として動的プロンプトに組み込みます。
+4項目の**平均スコアが高い**アイデアは Few-shot 例（目指すべき方向）として、
+**平均スコアが低い**アイデアは「避けるべき例」としてプロンプトに自動組み込みされます。
 
 ---
 
-## LLM プロバイダー切り替え
+## 使用モデルの変更
 
-`.env` の `LLM_PROVIDER` を変更するだけで切り替えられます:
+`.env` の `BEDROCK_MODEL_ID` を書き換えるだけで切り替えられます：
 
 ```env
-# OpenAI の場合
-LLM_PROVIDER=openai
-OPENAI_API_KEY=sk-...
+# 高速・低コスト（デフォルト）
+BEDROCK_MODEL_ID=anthropic.claude-haiku-4-5-20251001-v1:0
 
-# Gemini の場合
-LLM_PROVIDER=gemini
-GEMINI_API_KEY=AIza...
+# より高精度にしたい場合
+BEDROCK_MODEL_ID=anthropic.claude-sonnet-4-5-20251001-v1:0
+
+# 旧世代（モデルアクセスが通らないときの代替）
+BEDROCK_MODEL_ID=anthropic.claude-3-haiku-20240307-v1:0
 ```
 
 ---
 
-## APIキーなしでの動作確認
+## AWS認証なしでの動作確認
 
-APIキーが設定されていない場合、自動的にダミーデータモードで動作します。UIや評価フローの確認に使えます。
+AWS認証情報が未設定の場合、自動的に**ダミーデータモード**で起動します。
+UIのレイアウトや評価フローの確認に使えます。
 
 ---
 
-## DB スキーマ
+## トラブルシューティング
+
+| エラー | 原因 | 対処 |
+|--------|------|------|
+| `AccessDeniedException` | IAM権限不足 or モデルアクセス未申請 | AWSコンソールでモデルアクセスをリクエスト |
+| `ResourceNotFoundException` | モデルIDが間違っている | `.env` の `BEDROCK_MODEL_ID` を確認 |
+| `ThrottlingException` | リクエスト過多 | 少し待ってから再試行 |
+| AWS認証情報が読まれない | `.env` の場所が違う | `app.py` と同じディレクトリに `.env` を置く |
+
+---
+
+## DBスキーマ
 
 ```sql
 CREATE TABLE ideas (
@@ -119,4 +178,15 @@ CREATE TABLE evaluations (
     evaluated_at                  TEXT    NOT NULL,
     FOREIGN KEY (idea_id) REFERENCES ideas(id)
 );
+```
+
+---
+
+## .gitignore 推奨設定
+
+```gitignore
+.env
+idea_eval.db
+__pycache__/
+*.pyc
 ```

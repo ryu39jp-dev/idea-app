@@ -40,7 +40,7 @@ AIが生成したアプリ企画を評価するたびに、あなたの好みを
 ### 1. 依存パッケージのインストール
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt   
 ```
 
 ### 2. AWS側の準備
@@ -78,7 +78,7 @@ cp .env.example .env
 ```env
 AWS_ACCESS_KEY_ID=AKIAxxxxxxxxxxxxxxxxxxxx
 AWS_SECRET_ACCESS_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-AWS_DEFAULT_REGION=us-east-1
+AWS_DEFAULT_REGION=ap-southeast-2
 BEDROCK_MODEL_ID=anthropic.claude-haiku-4-5-20251001-v1:0
 ```
 

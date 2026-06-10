@@ -14,6 +14,7 @@ app.py — AI Trend Architect: トレンド分析から紐解くアプリ仕様�
 from __future__ import annotations
 
 import os
+import re
 
 from dotenv import load_dotenv
 
@@ -116,6 +117,26 @@ html, body, [class*="css"] { font-family: 'Noto Sans JP', sans-serif; }
     color: #6366f1;
     letter-spacing: 0.06em;
     margin: 0 0 1.2rem;
+}
+
+/* タブの高さ制限を完全に解除 */
+div[data-testid="stTabs"] { height: auto !important; }
+div[data-testid="stTabsContent"] {
+    height: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
+}
+div[data-testid="stTabContent"] {
+    height: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
+    padding-bottom: 2rem !important;
+}
+/* タブパネル内のMarkdownも高さ制限なし */
+div[data-testid="stTabContent"] .stMarkdown {
+    height: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
 }
 
 /* Markdownの見出し調整 */
@@ -354,39 +375,48 @@ if st.session_state.result:
                 unsafe_allow_html=True,
             )
 
-    # セクションをパースしてタブに分割
+    # ── セクション分割（一括split方式）────────────────────────────
     raw = st.session_state.result
 
-    def extract_section(text: str, marker: str, next_marker: str | None) -> str:
-        """## ① 〜 ## ② の間を抽出する"""
-        start = text.find(marker)
-        if start == -1:
-            return ""
-        if next_marker:
-            end = text.find(next_marker, start)
-            return text[start:end].strip() if end != -1 else text[start:].strip()
-        return text[start:].strip()
+    def split_sections(text: str) -> list[str]:
+        """
+        ## ① / ## ② を区切りとして全体を一括分割する。
+        行頭の #・空白の揺れを許容。
+        """
+        pattern = re.compile(
+            r'(?m)^[ \t]*(?:#{1,3}[ \t]*)?[①②]'
+        )
+        positions = [m.start() for m in pattern.finditer(text)]
 
-    sec1 = extract_section(raw, "## ①", "## ②")
-    sec2 = extract_section(raw, "## ②", "## ③")
-    sec3 = extract_section(raw, "## ③", "## ④")
-    sec4 = extract_section(raw, "## ④", None)
+        if not positions:
+            return []
 
-    # セクションが取れない場合は全文をそのまま表示
-    has_sections = any([sec1, sec2, sec3, sec4])
+        sections = []
+        for i, pos in enumerate(positions):
+            end = positions[i + 1] if i + 1 < len(positions) else len(text)
+            sections.append(text[pos:end].strip())
+
+        return sections
+
+    sections = split_sections(raw)
+    sec1 = sections[0] if len(sections) > 0 else ""
+    sec2 = sections[1] if len(sections) > 1 else ""
+
+    has_sections = any([sec1, sec2])
+
+    # デバッグ：生テキストと分割結果を確認（問題解消後に削除可）
+    with st.expander("🐛 デバッグ：生テキスト確認", expanded=False):
+        st.text(f"検出されたセクション数: {len(sections)}")
+        st.text_area("LLM生テキスト", raw, height=300)
 
     if has_sections:
-        tab1, tab2, tab3, tab4 = st.tabs([
+        tab1, tab2 = st.tabs([
             "👤 ① ターゲット選定",
             "💡 ② プロダクト構想",
-            "🛠️ ③ MVP設計",
-            "🎤 ④ ガクチカ",
         ])
         for tab, sec, label in [
             (tab1, sec1, "ターゲット選定"),
             (tab2, sec2, "プロダクト構想"),
-            (tab3, sec3, "MVP設計"),
-            (tab4, sec4, "ガクチカ"),
         ]:
             with tab:
                 if sec:

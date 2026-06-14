@@ -260,41 +260,18 @@ hr { border-color: rgba(255,255,255,0.07) !important; }
     margin: 0 0 1rem;
 }
 
-/* ── ページ内タブ（ラジオ風） ── */
-div[data-testid="stRadio"] > label { display: none; } /* ラジオ自体のラベルは非表示 */
-div[data-testid="stRadio"] > div {
-    display: flex;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-    border-bottom: 1px solid rgba(99,102,241,0.2);
-    padding-bottom: 0;
-    margin-bottom: 1.4rem;
+/* ── ページ内タブ切り替えボタン ── */
+.stButton > button[kind="secondary"] {
+    background: rgba(255,255,255,0.03) !important;
+    border: 1px solid rgba(99,102,241,0.18) !important;
+    color: #8888aa !important;
+    box-shadow: none !important;
+    font-weight: 500 !important;
 }
-div[data-testid="stRadio"] label {
-    background: rgba(255,255,255,0.03);
-    border: 1px solid rgba(99,102,241,0.18);
-    border-bottom: none;
-    border-radius: 10px 10px 0 0;
-    padding: 0.55rem 1.3rem !important;
-    cursor: pointer;
-    font-family: 'Space Mono', monospace;
-    font-size: 0.85rem;
-    color: #8888aa;
-    transition: all 0.15s;
-    margin-bottom: -1px;
-}
-div[data-testid="stRadio"] label:hover {
-    background: rgba(99,102,241,0.1);
-    color: #c7d2fe;
-}
-div[data-testid="stRadio"] label:has(input:checked) {
-    background: rgba(99,102,241,0.18);
-    border-color: rgba(99,102,241,0.5);
-    color: #a5b4fc;
-    font-weight: 700;
-}
-div[data-testid="stRadio"] label > div:first-child {
-    display: none; /* ラジオの丸を隠す */
+.stButton > button[kind="secondary"]:hover {
+    background: rgba(99,102,241,0.12) !important;
+    border-color: rgba(99,102,241,0.4) !important;
+    color: #c7d2fe !important;
 }
 
 .footer {
@@ -468,13 +445,25 @@ if st.session_state.idea_result:
     if st.session_state.view_tab not in tab_options:
         st.session_state.view_tab = "💡 ① アイデア"
 
-    selected_tab = st.radio(
-        label="表示切り替え",
-        options=tab_options,
-        horizontal=True,
-        label_visibility="collapsed",
-        key="view_tab",
-    )
+    # ── タブ切り替え（ボタン式）────────────────────────────
+    # 注意: view_tabはどのウィジェットのkeyにも使わない。
+    #       (st.radioのkeyにすると、生成系ボタンが処理後にview_tabを
+    #        書き換える際 "cannot be modified after the widget...is
+    #        instantiated" エラーになるため)
+    tab_cols = st.columns(len(tab_options))
+    for col, option in zip(tab_cols, tab_options):
+        with col:
+            is_active = (st.session_state.view_tab == option)
+            if st.button(
+                option,
+                key=f"tabbtn_{option}",
+                use_container_width=True,
+                type="primary" if is_active else "secondary",
+            ):
+                st.session_state.view_tab = option
+                st.rerun()
+
+    selected_tab = st.session_state.view_tab
 
     # ════════════════════════════════════════
     # タブ① — 核心アイデア

@@ -1,5 +1,6 @@
 """
 app.py — AI Trend Architect: トレンド分析から紐解くアプリ仕様ジェネレーター
+        （Haiku × Opus 4.6 ハイブリッド2段階構成）
 
 起動方法:
   streamlit run app.py
@@ -7,22 +8,26 @@ app.py — AI Trend Architect: トレンド分析から紐解くアプリ仕様�
 必要な環境変数（.env ファイルに設定）:
   AWS_ACCESS_KEY_ID      : AWSアクセスキー
   AWS_SECRET_ACCESS_KEY  : AWSシークレットキー
-  AWS_DEFAULT_REGION     : ap-southeast-2（Sydney）推奨
-  BEDROCK_MODEL_ID       : anthropic.claude-haiku-4-5-20251001-v1:0
+  AWS_DEFAULT_REGION     : ap-southeast-2（Sydney）推奨。Haiku/Opus共通のデフォルト
+  HAIKU_MODEL_ID / HAIKU_REGION : 第1段階（任意・通常は未設定でOK）
+  OPUS_MODEL_ID  / OPUS_REGION  : 第2段階（任意・通常は未設定でOK）
 
-フロー:
-  1. トレンドデータを貼り付けて「① 核心アイデアを生成する」
+フロー（バトンリレー形式）:
+  1. トレンドデータを貼り付けて「🚀 ① Haikuでベースアイデアを生成する」
+     → clean_trend_textでノイズ除去 → Claude Haiku 4.5 が箇条書きでブレスト
   2. 気に入らなければ指摘を入力して「この指摘を反映して再生成する」を繰り返す
-  3. アイデアが確定したら「✅ このアイデアで確定し、技術設計書を生成する」で②を生成
-  4. ②が確定したら「🤖 AI実装指示プロンプトを生成する」で③を生成
-     （③はコスト最適化を盛り込んだ、AIコーディングエージェント向けの指示文）
+     （①の再生成はHaikuなので低コスト）
+  3. アイデアが確定したら「✅ このアイデアで確定し、Opus 4.6で設計書を生成する」
+     → Claude Opus 4.6（シドニー推論プロファイル）が
+       「技術設計書」＋「AI実装指示プロンプト」を1回で凝縮生成（maxTokens=4000）
 
-  ①②③は画面上部の切り替えタブ（ラジオ風）で表示され、縦に積み重なりません。
+  ①②は画面上部の切り替えタブ（ボタン式）で表示され、縦に積み重なりません。
 """
 
 from __future__ import annotations
 
 import os
+import re
 
 from dotenv import load_dotenv
 
@@ -112,7 +117,7 @@ html, body, [class*="css"] { font-family: 'Noto Sans JP', sans-serif; }
 }
 .stButton > button:hover { opacity: 0.85 !important; }
 
-/* 出力エリア（①核心アイデア） */
+/* 出力エリア（①Haikuベースアイデア） */
 .output-panel {
     background: rgba(15,15,30,0.7);
     border: 1px solid rgba(99,102,241,0.2);
@@ -126,7 +131,7 @@ html, body, [class*="css"] { font-family: 'Noto Sans JP', sans-serif; }
     margin: 0 0 1.2rem;
 }
 
-/* 技術設計書パネル（②） */
+/* 技術設計書パネル（②Opus・前半） */
 .tech-panel {
     background: rgba(14,165,233,0.06);
     border: 1px solid rgba(14,165,233,0.25);
@@ -141,12 +146,13 @@ html, body, [class*="css"] { font-family: 'Noto Sans JP', sans-serif; }
     margin: 0 0 1.2rem;
 }
 
-/* AI実装指示プロンプトパネル（③） */
+/* AI実装指示プロンプトパネル（②Opus・後半） */
 .build-panel {
     background: rgba(34,211,238,0.05);
     border: 1px solid rgba(34,211,238,0.25);
     border-radius: 16px;
     padding: 1.8rem 2rem;
+    margin-top: 1.6rem;
 }
 .build-panel-title {
     font-family: 'Space Mono', monospace;
@@ -197,6 +203,7 @@ html, body, [class*="css"] { font-family: 'Noto Sans JP', sans-serif; }
 .badge-indigo { background: rgba(99,102,241,0.2); color: #a5b4fc; border: 1px solid rgba(99,102,241,0.35); }
 .badge-sky    { background: rgba(14,165,233,0.2);  color: #7dd3fc; border: 1px solid rgba(14,165,233,0.35); }
 .badge-green  { background: rgba(52,211,153,0.2);  color: #6ee7b7; border: 1px solid rgba(52,211,153,0.35); }
+.badge-amber  { background: rgba(251,191,36,0.18); color: #fcd34d; border: 1px solid rgba(251,191,36,0.35); }
 
 /* テキストエリア */
 .stTextArea textarea {
@@ -218,7 +225,7 @@ html, body, [class*="css"] { font-family: 'Noto Sans JP', sans-serif; }
 
 hr { border-color: rgba(255,255,255,0.07) !important; }
 
-/* フィードバックパネル */
+/* フィードバックパネル（①Haiku再生成） */
 .feedback-panel {
     background: rgba(52,211,153,0.06);
     border: 1px solid rgba(52,211,153,0.25);
@@ -239,7 +246,7 @@ hr { border-color: rgba(255,255,255,0.07) !important; }
     margin: 0 0 1rem;
 }
 
-/* 確定ボタンパネル */
+/* 確定ボタンパネル（①→②Opus） */
 .confirm-panel {
     background: rgba(244,114,182,0.06);
     border: 1px solid rgba(244,114,182,0.25);
@@ -289,20 +296,16 @@ hr { border-color: rgba(255,255,255,0.07) !important; }
 # セッション状態の初期化
 # ──────────────────────────────────────────
 
-if "idea_result" not in st.session_state:
-    st.session_state.idea_result = None        # ①核心アイデア（最新）
-if "tech_result" not in st.session_state:
-    st.session_state.tech_result = None         # ②技術設計書
-if "build_prompt_result" not in st.session_state:
-    st.session_state.build_prompt_result = None # ③AI実装指示プロンプト
+if "base_idea_result" not in st.session_state:
+    st.session_state.base_idea_result = None   # ①Haikuベースアイデア（最新）
+if "opus_result" not in st.session_state:
+    st.session_state.opus_result = None        # ②Opus結合出力（技術設計書＋実装指示）
 if "generating" not in st.session_state:
-    st.session_state.generating = False         # ①初回生成中
+    st.session_state.generating = False         # ①初回生成中（Haiku）
 if "refining" not in st.session_state:
-    st.session_state.refining = False           # ①再生成中
-if "tech_generating" not in st.session_state:
-    st.session_state.tech_generating = False    # ②生成中
-if "build_generating" not in st.session_state:
-    st.session_state.build_generating = False   # ③生成中
+    st.session_state.refining = False           # ①再生成中（Haiku）
+if "opus_generating" not in st.session_state:
+    st.session_state.opus_generating = False    # ②生成中（Opus）
 if "error" not in st.session_state:
     st.session_state.error = None
 if "last_input" not in st.session_state:
@@ -310,29 +313,48 @@ if "last_input" not in st.session_state:
 if "cleaned_chars" not in st.session_state:
     st.session_state.cleaned_chars = None       # クリーニング前後の文字数
 if "idea_history" not in st.session_state:
-    st.session_state.idea_history = []          # ①の過去バージョン履歴
+    st.session_state.idea_history = []          # ①の過去バージョン履歴（Haiku）
 if "view_tab" not in st.session_state:
-    st.session_state.view_tab = "💡 ① アイデア"  # 現在表示中のタブ
+    st.session_state.view_tab = "💡 ① Haikuベースアイデア"  # 現在表示中のタブ
+
+
+# ──────────────────────────────────────────
+# Opus結合出力のセクション分割
+# ──────────────────────────────────────────
+
+def split_opus_output(raw: str) -> tuple[str, str]:
+    """
+    Opusの結合出力を「技術設計書」と「AI実装指示プロンプト」に分割する。
+    "## 🤖 AI実装指示プロンプト" のような見出し行で分割する。
+    見つからない場合は全体を技術設計書側に入れ、プロンプト側は空文字を返す。
+    """
+    pattern = re.compile(r'(?m)^[ \t]*#{0,3}[ \t]*🤖?[ \t]*AI実装指示プロンプト.*$')
+    m = pattern.search(raw)
+    if not m:
+        return raw.strip(), ""
+    tech_part = raw[:m.start()].strip()
+    prompt_part = raw[m.end():].strip()
+    return tech_part, prompt_part
+
 
 # ──────────────────────────────────────────
 # ヘッダー
 # ──────────────────────────────────────────
 
-model_id = os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-haiku-4-5-20251001-v1:0")
-region   = os.getenv("AWS_DEFAULT_REGION", "ap-southeast-2")
-is_live  = bool(os.getenv("AWS_ACCESS_KEY_ID") and os.getenv("AWS_SECRET_ACCESS_KEY"))
+is_live = bool(os.getenv("AWS_ACCESS_KEY_ID") and os.getenv("AWS_SECRET_ACCESS_KEY"))
 
 badge_html = (
     f'<span class="badge badge-indigo">🏗️ AI Trend Architect</span>'
-    f'<span class="badge badge-sky">{model_id.split(".")[-1]}</span>'
-    f'<span class="badge badge-sky">Region: {region}</span>'
+    f'<span class="badge badge-amber">⚡ Stage1: Haiku 4.5</span>'
+    f'<span class="badge badge-sky">🧠 Stage2: Opus 4.6</span>'
+    f'<span class="badge badge-sky">Region: {llm.OPUS_REGION}</span>'
     f'<span class="badge badge-green">{"🟢 LIVE" if is_live else "🔴 DEMO"}</span>'
 )
 
 st.markdown(f"""
 <div class="app-header">
     <h1>🏗️ AI Trend Architect</h1>
-    <p>トレンド分析から紐解くアプリ仕様ジェネレーター — 他のAIの出力を、即・開発仕様書に変換する</p>
+    <p>トレンド分析から紐解くアプリ仕様ジェネレーター — Haiku×Opusのハイブリッド2段階生成</p>
     <div style="margin-top:0.8rem">{badge_html}</div>
 </div>
 """, unsafe_allow_html=True)
@@ -386,8 +408,8 @@ with st.expander("💡 精度を上げるコツ", expanded=False):
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# 生成ボタン（①核心アイデア）
-btn_label = "⏳ 生成中..." if st.session_state.generating else "🚀 ① 核心アイデアを生成する"
+# 生成ボタン（①Haikuベースアイデア）
+btn_label = "⏳ 生成中..." if st.session_state.generating else "🚀 ① Haikuでベースアイデアを生成する"
 generate_clicked = st.button(
     btn_label,
     disabled=st.session_state.generating or not trend_input.strip(),
@@ -396,27 +418,26 @@ generate_clicked = st.button(
 
 st.divider()
 
-# ── 生成処理（①初回） ──────────────────────────────
+# ── 生成処理（①初回・Haiku） ──────────────────────────────
 if generate_clicked and trend_input.strip():
     st.session_state.generating = True
     st.session_state.error = None
 
-    with st.spinner("Claude Haiku 4.5 がアイデアを構築中... 🏗️"):
+    with st.spinner("Claude Haiku 4.5 がベースアイデアをブレスト中... ⚡"):
         try:
             if is_live:
                 cleaned = llm.clean_trend_text(trend_input.strip())
                 st.session_state.cleaned_chars = (len(trend_input.strip()), len(cleaned))
-                idea = llm.generate_idea_spec(trend_input.strip())
+                idea = llm.generate_base_idea(trend_input.strip())
             else:
                 st.session_state.cleaned_chars = None
-                idea = llm.generate_idea_spec_dummy()
+                idea = llm.generate_base_idea_dummy()
 
-            st.session_state.idea_result = idea
+            st.session_state.base_idea_result = idea
             st.session_state.last_input = trend_input.strip()
-            st.session_state.idea_history = [idea]       # 新規生成のたびに履歴をリセット
-            st.session_state.tech_result = None          # ②も必ずリセット
-            st.session_state.build_prompt_result = None  # ③も必ずリセット
-            st.session_state.view_tab = "💡 ① アイデア"
+            st.session_state.idea_history = [idea]   # 新規生成のたびに履歴をリセット
+            st.session_state.opus_result = None      # ②も必ずリセット
+            st.session_state.view_tab = "💡 ① Haikuベースアイデア"
 
         except (EnvironmentError, ImportError) as e:
             st.session_state.error = str(e)
@@ -431,19 +452,17 @@ if generate_clicked and trend_input.strip():
 if st.session_state.error:
     st.error(st.session_state.error)
 
-# ── ①②③ 切り替えタブ ──────────────────────────────────────
-if st.session_state.idea_result:
+# ── ①② 切り替えタブ ──────────────────────────────────────
+if st.session_state.base_idea_result:
 
     # 利用可能なタブを動的に構築
-    tab_options = ["💡 ① アイデア"]
-    if st.session_state.tech_result:
-        tab_options.append("🛠️ ② 技術設計書")
-    if st.session_state.build_prompt_result:
-        tab_options.append("🤖 ③ AI実装指示")
+    tab_options = ["💡 ① Haikuベースアイデア"]
+    if st.session_state.opus_result:
+        tab_options.append("🛠️ ② Opus設計書＋実装指示")
 
-    # 現在のview_tabが選択肢に存在しない場合（②③がまだ無い等）は①に戻す
+    # 現在のview_tabが選択肢に存在しない場合（②がまだ無い等）は①に戻す
     if st.session_state.view_tab not in tab_options:
-        st.session_state.view_tab = "💡 ① アイデア"
+        st.session_state.view_tab = "💡 ① Haikuベースアイデア"
 
     # ── タブ切り替え（ボタン式）────────────────────────────
     # 注意: view_tabはどのウィジェットのkeyにも使わない。
@@ -466,17 +485,17 @@ if st.session_state.idea_result:
     selected_tab = st.session_state.view_tab
 
     # ════════════════════════════════════════
-    # タブ① — 核心アイデア
+    # タブ① — Haikuベースアイデア
     # ════════════════════════════════════════
-    if selected_tab == "💡 ① アイデア":
+    if selected_tab == "💡 ① Haikuベースアイデア":
 
         # ダウンロードボタン + クリーニング結果
         dl_col, info_col = st.columns([1, 3])
         with dl_col:
             st.download_button(
                 label="📥 ①を.mdで保存",
-                data=st.session_state.idea_result,
-                file_name="idea_spec.md",
+                data=st.session_state.base_idea_result,
+                file_name="base_idea.md",
                 mime="text/markdown",
                 key="dl_idea",
             )
@@ -494,18 +513,18 @@ if st.session_state.idea_result:
                 )
 
         st.markdown('<div class="output-panel">', unsafe_allow_html=True)
-        st.markdown("### 💡 ① プロダクトの核心アイデア", unsafe_allow_html=False)
-        st.markdown(st.session_state.idea_result)
+        st.markdown("### ⚡ ① Haikuが考えたベースアイデア（ブレスト）", unsafe_allow_html=False)
+        st.markdown(st.session_state.base_idea_result)
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # ── フィードバック & 再生成パネル ──────────────────────
+        # ── フィードバック & 再生成パネル（Haiku） ──────────────
         st.markdown('<div class="feedback-panel">', unsafe_allow_html=True)
         st.markdown("### 🔧 このアイデアに指摘・修正要望を出す", unsafe_allow_html=False)
         st.markdown(
             '<p class="desc">'
             '気になる点・変えたい部分を具体的に書いてください（例：「アプリ名がありきたりなので'
             'もっと個性的な案にして」「主要機能をもっとシンプルにして」など）。'
-            'この指摘を反映して、①のアイデアを再生成します。'
+            'この指摘を反映して、Haikuが①のアイデアを再生成します（低コスト）。'
             '</p>',
             unsafe_allow_html=True,
         )
@@ -524,7 +543,7 @@ if st.session_state.idea_result:
         )
 
         refine_clicked = st.button(
-            "⏳ 再生成中..." if st.session_state.refining else "🔄 この指摘を反映して再生成する",
+            "⏳ 再生成中..." if st.session_state.refining else "🔄 この指摘を反映して再生成する（Haiku）",
             disabled=st.session_state.refining or not feedback_text.strip(),
             use_container_width=True,
             key="refine_button",
@@ -540,27 +559,26 @@ if st.session_state.idea_result:
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # ── 再生成処理（①フィードバック反映） ──────────────────
+        # ── 再生成処理（①フィードバック反映・Haiku） ──────────────
         if refine_clicked and feedback_text.strip():
             st.session_state.refining = True
             st.session_state.error = None
 
-            with st.spinner("指摘を反映してアイデアを再構築中... 🔧"):
+            with st.spinner("Haikuが指摘を反映してベースアイデアを再構築中... ⚡"):
                 try:
                     if is_live:
-                        refined = llm.refine_idea_spec(
+                        refined = llm.refine_base_idea(
                             trend_text=st.session_state.last_input,
-                            previous_idea=st.session_state.idea_result,
+                            previous_idea=st.session_state.base_idea_result,
                             feedback=feedback_text.strip(),
                         )
                     else:
-                        refined = llm.generate_idea_spec_dummy()
+                        refined = llm.generate_base_idea_dummy()
 
                     st.session_state.idea_history.append(refined)
-                    st.session_state.idea_result = refined
-                    st.session_state.tech_result = None          # ①が変わったら②をリセット
-                    st.session_state.build_prompt_result = None  # ③もリセット
-                    st.session_state.view_tab = "💡 ① アイデア"
+                    st.session_state.base_idea_result = refined
+                    st.session_state.opus_result = None  # ①が変わったら②をリセット
+                    st.session_state.view_tab = "💡 ① Haikuベースアイデア"
 
                 except (EnvironmentError, ImportError) as e:
                     st.session_state.error = str(e)
@@ -571,216 +589,134 @@ if st.session_state.idea_result:
 
             st.rerun()
 
-        # ── 確定 → ②生成パネル ──────────────────────────────
+        # ── 確定 → ②Opus生成パネル ──────────────────────────────
         st.markdown('<div class="confirm-panel">', unsafe_allow_html=True)
         st.markdown("### ✅ このアイデアで確定する", unsafe_allow_html=False)
         st.markdown(
             '<p class="desc">'
-            'もう指摘するところがなければ、このアイデアを確定し、'
-            '技術スタック・自動生成用構造設計書（②）を生成します。'
+            'もう指摘するところがなければ、このベースアイデアを確定し、'
+            '<strong>Claude Opus 4.6</strong>に引き継いで'
+            '「技術設計書」と「AI実装指示プロンプト」を1回で凝縮生成します'
+            '（出力は無駄な解説を省いた簡潔な形式・maxTokens=4000の物理ブレーキ付き）。'
             '</p>',
             unsafe_allow_html=True,
         )
 
         confirm_clicked = st.button(
-            "⏳ 設計書を生成中..." if st.session_state.tech_generating
-            else "✅ このアイデアで確定し、技術設計書を生成する",
-            disabled=st.session_state.tech_generating,
+            "⏳ Opusが設計書を生成中..." if st.session_state.opus_generating
+            else "✅ このアイデアで確定し、Opus 4.6で設計書を生成する",
+            disabled=st.session_state.opus_generating,
             use_container_width=True,
             key="confirm_button",
         )
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # ── 生成処理（②技術設計書） ────────────────────────────
+        # ── 生成処理（②Opus結合出力） ────────────────────────────
         if confirm_clicked:
-            st.session_state.tech_generating = True
+            st.session_state.opus_generating = True
             st.session_state.error = None
 
-            with st.spinner("技術スタック・構造設計書を構築中... 🛠️"):
+            with st.spinner("Claude Opus 4.6 が技術設計書＋実装指示を構築中... 🧠"):
                 try:
                     if is_live:
-                        tech = llm.generate_tech_spec(st.session_state.idea_result)
+                        opus = llm.generate_opus_spec(st.session_state.base_idea_result)
                     else:
-                        tech = llm.generate_tech_spec_dummy()
+                        opus = llm.generate_opus_spec_dummy()
 
-                    st.session_state.tech_result = tech
-                    st.session_state.build_prompt_result = None  # ③もリセット
-                    st.session_state.view_tab = "🛠️ ② 技術設計書"
+                    st.session_state.opus_result = opus
+                    st.session_state.view_tab = "🛠️ ② Opus設計書＋実装指示"
 
                 except (EnvironmentError, ImportError) as e:
                     st.session_state.error = str(e)
                 except Exception as e:
                     st.session_state.error = f"予期しないエラー: {e}"
                 finally:
-                    st.session_state.tech_generating = False
+                    st.session_state.opus_generating = False
 
             st.rerun()
 
     # ════════════════════════════════════════
-    # タブ② — 技術スタック ＆ 構造設計書
+    # タブ② — Opus設計書 ＋ AI実装指示プロンプト
     # ════════════════════════════════════════
-    elif selected_tab == "🛠️ ② 技術設計書":
+    elif selected_tab == "🛠️ ② Opus設計書＋実装指示":
 
+        tech_part, prompt_part = split_opus_output(st.session_state.opus_result)
+
+        # --- 技術設計書（前半） ---
         st.markdown('<div class="tech-panel">', unsafe_allow_html=True)
         st.markdown(
-            '<p class="tech-panel-title">🛠️ ② 最適技術スタック ＆ 自動生成用構造設計書</p>',
+            '<p class="tech-panel-title">🛠️ Opusが仕上げた極小・高精度な技術設計書</p>',
             unsafe_allow_html=True,
         )
-        st.markdown(st.session_state.tech_result)
+        st.markdown(tech_part if tech_part else st.session_state.opus_result)
         st.markdown("</div>", unsafe_allow_html=True)
 
-        dl_col2, regen_col2 = st.columns([1, 1])
+        # --- AI実装指示プロンプト（後半・コピー用） ---
+        if prompt_part:
+            st.markdown('<div class="build-panel">', unsafe_allow_html=True)
+            st.markdown(
+                '<p class="build-panel-title">🤖 AI実装指示プロンプト（コピー用・コスト最適化込み）</p>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                '<p style="font-size:0.8rem; color:#8aa; margin-bottom:1rem;">'
+                'このプロンプトをそのままコピーして、Claude CodeやCursorなどの'
+                'AIコーディングエージェントに貼り付けると実装が始められます。'
+                '</p>',
+                unsafe_allow_html=True,
+            )
+            st.code(prompt_part, language="markdown")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # --- ダウンロード & 再生成 ---
+        dl_col2, dl_col3, regen_col2 = st.columns([1, 1, 1])
         with dl_col2:
             st.download_button(
-                label="📥 ②を.mdで保存",
-                data=st.session_state.tech_result,
+                label="📥 設計書を.mdで保存",
+                data=tech_part if tech_part else st.session_state.opus_result,
                 file_name="tech_spec.md",
                 mime="text/markdown",
                 key="dl_tech",
                 use_container_width=True,
             )
-        with regen_col2:
-            regen_tech_clicked = st.button(
-                "⏳ 再生成中..." if st.session_state.tech_generating else "🔄 ②を再生成する",
-                disabled=st.session_state.tech_generating,
-                use_container_width=True,
-                key="regen_tech_button",
-            )
-
-        if regen_tech_clicked:
-            st.session_state.tech_generating = True
-            st.session_state.error = None
-
-            with st.spinner("技術スタック・構造設計書を再構築中... 🛠️"):
-                try:
-                    if is_live:
-                        tech = llm.generate_tech_spec(st.session_state.idea_result)
-                    else:
-                        tech = llm.generate_tech_spec_dummy()
-
-                    st.session_state.tech_result = tech
-                    st.session_state.build_prompt_result = None
-                    st.session_state.view_tab = "🛠️ ② 技術設計書"
-
-                except (EnvironmentError, ImportError) as e:
-                    st.session_state.error = str(e)
-                except Exception as e:
-                    st.session_state.error = f"予期しないエラー: {e}"
-                finally:
-                    st.session_state.tech_generating = False
-
-            st.rerun()
-
-        # ── 確定 → ③生成パネル ──────────────────────────────
-        st.markdown('<div class="confirm-panel">', unsafe_allow_html=True)
-        st.markdown("### 🤖 この設計書でAI実装指示プロンプトを作る", unsafe_allow_html=False)
-        st.markdown(
-            '<p class="desc">'
-            'Claude CodeやCursorなどのAIコーディングエージェントに、そのまま貼り付けて'
-            '実装を依頼できる指示プロンプトを生成します。'
-            '<strong>運用コストを抑える実装方針</strong>（無料枠ホスティング・API呼び出し最適化・'
-            'キャッシュ等）も指示文に含まれます。'
-            '</p>',
-            unsafe_allow_html=True,
-        )
-
-        build_clicked = st.button(
-            "⏳ 生成中..." if st.session_state.build_generating
-            else "🤖 AI実装指示プロンプトを生成する",
-            disabled=st.session_state.build_generating,
-            use_container_width=True,
-            key="build_button",
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        # ── 生成処理（③AI実装指示プロンプト） ──────────────────
-        if build_clicked:
-            st.session_state.build_generating = True
-            st.session_state.error = None
-
-            with st.spinner("AIエージェント向けの実装指示プロンプトを構築中... 🤖"):
-                try:
-                    if is_live:
-                        build_prompt = llm.generate_build_prompt(
-                            idea_spec=st.session_state.idea_result,
-                            tech_spec=st.session_state.tech_result,
-                        )
-                    else:
-                        build_prompt = llm.generate_build_prompt_dummy()
-
-                    st.session_state.build_prompt_result = build_prompt
-                    st.session_state.view_tab = "🤖 ③ AI実装指示"
-
-                except (EnvironmentError, ImportError) as e:
-                    st.session_state.error = str(e)
-                except Exception as e:
-                    st.session_state.error = f"予期しないエラー: {e}"
-                finally:
-                    st.session_state.build_generating = False
-
-            st.rerun()
-
-    # ════════════════════════════════════════
-    # タブ③ — AI実装指示プロンプト
-    # ════════════════════════════════════════
-    elif selected_tab == "🤖 ③ AI実装指示":
-
-        st.markdown('<div class="build-panel">', unsafe_allow_html=True)
-        st.markdown(
-            '<p class="build-panel-title">🤖 ③ AI実装指示プロンプト（コスト最適化込み）</p>',
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            '<p style="font-size:0.8rem; color:#8aa; margin-bottom:1rem;">'
-            'このプロンプトをそのままコピーして、Claude CodeやCursorなどの'
-            'AIコーディングエージェントに貼り付けると実装が始められます。'
-            '</p>',
-            unsafe_allow_html=True,
-        )
-        st.code(st.session_state.build_prompt_result, language="markdown")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        dl_col3, regen_col3 = st.columns([1, 1])
         with dl_col3:
             st.download_button(
-                label="📥 ③を.mdで保存",
-                data=st.session_state.build_prompt_result,
+                label="📥 実装指示を.mdで保存",
+                data=prompt_part if prompt_part else "",
                 file_name="build_prompt.md",
                 mime="text/markdown",
                 key="dl_build",
                 use_container_width=True,
+                disabled=not prompt_part,
             )
-        with regen_col3:
-            regen_build_clicked = st.button(
-                "⏳ 再生成中..." if st.session_state.build_generating else "🔄 ③を再生成する",
-                disabled=st.session_state.build_generating,
+        with regen_col2:
+            regen_opus_clicked = st.button(
+                "⏳ 再生成中..." if st.session_state.opus_generating else "🔄 ②を再生成する（Opus）",
+                disabled=st.session_state.opus_generating,
                 use_container_width=True,
-                key="regen_build_button",
+                key="regen_opus_button",
             )
 
-        if regen_build_clicked:
-            st.session_state.build_generating = True
+        if regen_opus_clicked:
+            st.session_state.opus_generating = True
             st.session_state.error = None
 
-            with st.spinner("AIエージェント向けの実装指示プロンプトを再構築中... 🤖"):
+            with st.spinner("Claude Opus 4.6 が技術設計書＋実装指示を再構築中... 🧠"):
                 try:
                     if is_live:
-                        build_prompt = llm.generate_build_prompt(
-                            idea_spec=st.session_state.idea_result,
-                            tech_spec=st.session_state.tech_result,
-                        )
+                        opus = llm.generate_opus_spec(st.session_state.base_idea_result)
                     else:
-                        build_prompt = llm.generate_build_prompt_dummy()
+                        opus = llm.generate_opus_spec_dummy()
 
-                    st.session_state.build_prompt_result = build_prompt
-                    st.session_state.view_tab = "🤖 ③ AI実装指示"
+                    st.session_state.opus_result = opus
+                    st.session_state.view_tab = "🛠️ ② Opus設計書＋実装指示"
 
                 except (EnvironmentError, ImportError) as e:
                     st.session_state.error = str(e)
                 except Exception as e:
                     st.session_state.error = f"予期しないエラー: {e}"
                 finally:
-                    st.session_state.build_generating = False
+                    st.session_state.opus_generating = False
 
             st.rerun()
 
@@ -799,7 +735,7 @@ elif not st.session_state.error:
     <div>
         <div style="font-size:2.5rem; opacity:0.35">🏗️</div>
         <p style="font-family:'Space Mono',monospace; font-size:0.82rem; color:#555577; margin:0.5rem 0 0;">
-            ①核心アイデアがここに表示されます
+            ①Haikuのベースアイデアがここに表示されます
         </p>
     </div>
 </div>
@@ -810,6 +746,6 @@ elif not st.session_state.error:
 # ──────────────────────────────────────────
 
 st.markdown(
-    '<div class="footer">AI Trend Architect — Powered by Amazon Bedrock × Claude Haiku 4.5 × Streamlit</div>',
+    '<div class="footer">AI Trend Architect — Powered by Amazon Bedrock × Claude Haiku 4.5 + Opus 4.6 × Streamlit</div>',
     unsafe_allow_html=True,
 )
